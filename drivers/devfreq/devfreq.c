@@ -1180,37 +1180,15 @@ static ssize_t available_frequencies_show(struct device *d,
 					  char *buf)
 {
 	struct devfreq *df = to_devfreq(d);
-	struct device *dev = df->dev.parent;
-	struct dev_pm_opp *opp;
-	unsigned int i = 0, max_state = df->profile->max_state;
-	bool use_opp;
-	ssize_t count = 0;
-	unsigned long freq = 0;
 
-	rcu_read_lock();
-	use_opp = dev_pm_opp_get_opp_count(dev) > 0;
-	while (use_opp || (!use_opp && i < max_state)) {
-		if (use_opp) {
-			opp = dev_pm_opp_find_freq_ceil(dev, &freq);
-			if (IS_ERR(opp))
-				break;
-		} else {
-			freq = df->profile->freq_table[i++];
-		}
+	int index, num_chars = 0;
 
-		count += scnprintf(&buf[count], (PAGE_SIZE - count - 2),
-				   "%lu ", freq);
-		freq++;
-	}
-	rcu_read_unlock();
+	for (index = 0; index < df->profile->max_state; index++)
+		num_chars += snprintf(buf + num_chars, PAGE_SIZE, "%d ",
+		df->profile->freq_table[index]);
+	buf[num_chars++] = '\n';
 
-	/* Truncate the trailing space */
-	if (count)
-		count--;
-
-	count += sprintf(&buf[count], "\n");
-
-	return count;
+	return num_chars;
 }
 static DEVICE_ATTR_RO(available_frequencies);
 
