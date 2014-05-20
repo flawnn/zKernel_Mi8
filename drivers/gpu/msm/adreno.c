@@ -2266,6 +2266,149 @@ int adreno_reset(struct kgsl_device *device, int fault)
 
 	if (atomic_read(&device->active_cnt))
 		kgsl_pwrctrl_change_state(device, KGSL_STATE_ACTIVE);
+	
+
+	/* Set the page table back to the default page table */
+	kgsl_mmu_setstate(&device->mmu, device->mmu.defaultpagetable,
+			KGSL_MEMSTORE_GLOBAL);
+
+	return ret;
+}
+
+/**
+ * _ft_sysfs_store() -  Common routine to write to FT sysfs files
+ * @buf: value to write
+ * @count: size of the value to write
+ * @sysfs_cfg: KGSL FT sysfs config to write
+ *
+ * This is a common routine to write to FT sysfs files.
+ */
+static int _ft_sysfs_store(const char *buf, size_t count, int *ptr)
+{
+	char temp[20];
+	long val;
+	int rc;
+
+	snprintf(temp, sizeof(temp), "%.*s",
+			 (int)min(count, sizeof(temp) - 1), buf);
+	rc = kstrtol(temp, 0, &val);
+	if (rc)
+		return rc;
+
+	*ptr = val;
+
+	return count;
+}
+
+/**
+ * _get_adreno_dev() -  Routine to get a pointer to adreno dev
+ * @dev: device ptr
+ * @attr: Device attribute
+ * @buf: value to write
+ * @count: size of the value to write
+ */
+struct adreno_device *_get_adreno_dev(struct device *dev)
+{
+	struct kgsl_device *device = kgsl_device_from_dev(dev);
+	return device ? ADRENO_DEVICE(device) : NULL;
+}
+
+/**
+ * _ft_policy_store() -  Routine to configure FT policy
+ * @dev: device ptr
+ * @attr: Device attribute
+ * @buf: value to write
+ * @count: size of the value to write
+ *
+ * FT policy can be set to any of the options below.
+ * KGSL_FT_DISABLE -> BIT(0) Set to disable FT
+ * KGSL_FT_REPLAY  -> BIT(1) Set to enable replay
+ * KGSL_FT_SKIPIB  -> BIT(2) Set to skip IB
+ * KGSL_FT_SKIPFRAME -> BIT(3) Set to skip frame
+ * by default set FT policy to KGSL_FT_DEFAULT_POLICY
+ */
+static int _ft_policy_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct adreno_device *adreno_dev = _get_adreno_dev(dev);
+	int ret;
+	if (adreno_dev == NULL)
+		return 0;
+
+	mutex_lock(&adreno_dev->dev.mutex);
+	ret = _ft_sysfs_store(buf, count, &adreno_dev->ft_policy);
+	mutex_unlock(&adreno_dev->dev.mutex);
+
+	return ret;
+}
+
+/**
+ * _ft_policy_show() -  Routine to read FT policy
+ * @dev: device ptr
+ * @attr: Device attribute
+ * @buf: value read
+ *
+ * This is a routine to read current FT policy
+ */
+static int _ft_policy_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	struct adreno_device *adreno_dev = _get_adreno_dev(dev);
+	if (adreno_dev == NULL)
+		return 0;
+	return snprintf(buf, PAGE_SIZE, "0x%X\n", adreno_dev->ft_policy);
+}
+
+/**
+ * _ft_pagefault_policy_store() -  Routine to configure FT
+ * pagefault policy
+ * @dev: device ptr
+ * @attr: Device attribute
+ * @buf: value to write
+ * @count: size of the value to write
+ *
+ * FT pagefault policy can be set to any of the options below.
+ * KGSL_FT_PAGEFAULT_INT_ENABLE -> BIT(0) set to enable pagefault INT
+ * KGSL_FT_PAGEFAULT_GPUHALT_ENABLE  -> BIT(1) Set to enable GPU HALT on
+ * pagefaults. This stalls the GPU on a pagefault on IOMMU v1 HW.
+ * KGSL_FT_PAGEFAULT_LOG_ONE_PER_PAGE  -> BIT(2) Set to log only one
+ * pagefault per page.
+ * KGSL_FT_PAGEFAULT_LOG_ONE_PER_INT -> BIT(3) Set to log only one
+ * pagefault per INT.
+ */
+static int _ft_pagefault_policy_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct adreno_device *adreno_dev = _get_adreno_dev(dev);
+	int ret = 0;
+	unsigned int policy = 0;
+	if (adreno_dev == NULL)
+		return 0;
+
+	mutex_lock(&adreno_dev->dev.mutex);
+
+	/* MMU option changed call function to reset MMU options */
+	if (count != _ft_sysfs_store(buf, count, &policy))
+		ret = -EINVAL;
+
+	if (!ret) {
+		policy &= (KGSL_FT_PAGEFAULT_INT_ENABLE |
+				KGSL_FT_PAGEFAULT_GPUHALT_ENABLE |
+				KGSL_FT_PAGEFAULT_LOG_ONE_PER_PAGE |
+				KGSL_FT_PAGEFAULT_LOG_ONE_PER_INT);
+		ret = kgsl_mmu_set_pagefault_policy(&(adreno_dev->dev.mmu),
+				adreno_dev->ft_pf_policy);
+		if (!ret)
+			adreno_dev->ft_pf_policy = policy;
+	}
+	mutex_unlock(&adreno_dev->dev.mutex);
+
+	if (!ret)
+		return count;
+>>>>>>> 123d953787a9... msm: kgsl: Fix nice level for higher priority GPU start thread
 	else
 		kgsl_pwrctrl_change_state(device, KGSL_STATE_NAP);
 
