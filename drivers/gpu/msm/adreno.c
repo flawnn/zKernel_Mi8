@@ -1849,6 +1849,14 @@ static int _adreno_start(struct adreno_device *adreno_dev)
 
 	adreno_ringbuffer_set_global(adreno_dev, 0);
 
+	kgsl_pwrctrl_set_state(device, KGSL_STATE_INIT);
+	/*
+	 * initialization only needs to be done once initially until
+	 * device is shutdown
+	 */
+	if (test_bit(ADRENO_DEVICE_INITIALIZED, &adreno_dev->priv))
+		return 0;
+
 	status = kgsl_mmu_start(device);
 	if (status)
 		goto error_pwr_off;
@@ -2077,7 +2085,7 @@ error_pwr_off:
  * @priority:  Boolean flag to specify of the start should be scheduled in a low
  * latency work queue
  *
- * Power up the GPU and initialize it.  If priority is specified then elevate
+ * Power up the GPU and initialize it.  If priority is specified then elevate it
  * the thread priority for the duration of the start operation
  */
 int adreno_start(struct kgsl_device *device, int priority)
