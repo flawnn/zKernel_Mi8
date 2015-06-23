@@ -8,7 +8,6 @@
 #include <linux/slab.h>
 #include <trace/events/sched.h>
 #include <linux/list.h>
-
 #include "sched.h"
 #include "tune.h"
 
@@ -19,6 +18,7 @@ bool schedtune_initialized = false;
 #endif
 
 unsigned int sysctl_sched_cfs_boost __read_mostly;
+
 
 extern struct reciprocal_value schedtune_spc_rdiv;
 struct target_nrg schedtune_target_nrg;
@@ -123,6 +123,7 @@ __schedtune_accept_deltas(int nrg_delta, int cap_delta,
 
 /*
  * EAS scheduler tunables for task groups.
+
  *
  * When CGroup support is enabled, we have to synchronize two different
  * paths:
@@ -181,6 +182,7 @@ __schedtune_accept_deltas(int nrg_delta, int cap_delta,
  *                                                        |                                 +
  *                                                        |          schedtune_tasks_update()
  *                                                        |
+
  */
 
 /* SchdTune tunables for a group of tasks */
@@ -193,6 +195,7 @@ struct schedtune {
 
 	/* Boost value for tasks on that SchedTune CGroup */
 	int boost;
+
 
 #ifdef CONFIG_SCHED_WALT
 	/* Toggle ability to override sched boost enabled */
@@ -251,11 +254,14 @@ struct schedtune {
 	/* Array of tracked boost values of each slot */
 	int slot_boost[DYNAMIC_BOOST_SLOTS_COUNT];
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
+
 };
 
 static inline struct schedtune *css_st(struct cgroup_subsys_state *css)
 {
+
 	return container_of(css, struct schedtune, css);
+
 }
 
 static inline struct schedtune *task_schedtune(struct task_struct *tsk)
@@ -337,6 +343,7 @@ schedtune_accept_deltas(int nrg_delta, int cap_delta,
 			perf_boost_idx, perf_constrain_idx);
 }
 
+
 /*
  * Maximum number of boost groups to support
  * When per-task boosting is used we still allow only limited number of
@@ -348,7 +355,9 @@ schedtune_accept_deltas(int nrg_delta, int cap_delta,
  *    implementation especially for the computation of the per-CPU boost
  *    value
  */
+
 #define BOOSTGROUPS_COUNT 5
+
 
 /* Array of configured boostgroups */
 static struct schedtune *allocated_group[BOOSTGROUPS_COUNT] = {
@@ -366,6 +375,7 @@ static struct schedtune *allocated_group[BOOSTGROUPS_COUNT] = {
  */
 struct boost_groups {
 	/* Maximum boost value for all RUNNABLE tasks on a CPU */
+
 	int boost_max;
 	struct {
 		/* True when this boost group maps an actual cgroup */
@@ -381,6 +391,7 @@ struct boost_groups {
 
 /* Boost groups affecting each CPU in the system */
 DEFINE_PER_CPU(struct boost_groups, cpu_boost_groups);
+
 
 #ifdef CONFIG_SCHED_WALT
 static inline void init_sched_boost(struct schedtune *st)
@@ -845,6 +856,7 @@ prefer_idle_write(struct cgroup_subsys_state *css, struct cftype *cft,
 }
 
 static s64
+
 boost_read(struct cgroup_subsys_state *css, struct cftype *cft)
 {
 	struct schedtune *st = css_st(css);
@@ -931,8 +943,10 @@ sched_boost_write(struct cgroup_subsys_state *css, struct cftype *cft,
 	struct schedtune *st = css_st(css);
 	st->sched_boost = sched_boost;
 
+
 	return 0;
 }
+
 
 static void
 boost_slots_init(struct schedtune *st)
@@ -1016,6 +1030,7 @@ schedtune_boostgroup_init(struct schedtune *st, int idx)
 	struct boost_groups *bg;
 	int cpu;
 
+
 	/* Initialize per CPUs boost group support */
 	for_each_possible_cpu(cpu) {
 		bg = &per_cpu(cpu_boost_groups, cpu);
@@ -1038,8 +1053,10 @@ schedtune_css_alloc(struct cgroup_subsys_state *parent_css)
 	struct schedtune *st;
 	int idx;
 
+
 	if (!parent_css)
 		return &root_schedtune.css;
+
 
 	/* Allow only single level hierachies */
 	if (parent_css != &root_schedtune.css) {
@@ -1062,6 +1079,7 @@ schedtune_css_alloc(struct cgroup_subsys_state *parent_css)
 		goto out;
 
 	/* Initialize per CPUs boost group support */
+
 	init_sched_boost(st);
 	schedtune_boostgroup_init(st, idx);
 
@@ -1074,6 +1092,7 @@ out:
 static void
 schedtune_boostgroup_release(struct schedtune *st)
 {
+
 	struct boost_groups *bg;
 	int cpu;
 
@@ -1097,21 +1116,25 @@ schedtune_css_free(struct cgroup_subsys_state *css)
 {
 	struct schedtune *st = css_st(css);
 
+
 	/* Release per CPUs boost group support */
-	schedtune_boostgroup_release(st);
-	kfree(st);
+
 }
 
 struct cgroup_subsys schedtune_cgrp_subsys = {
 	.css_alloc	= schedtune_css_alloc,
 	.css_free	= schedtune_css_free,
+
 	.allow_attach	= subsys_cgroup_allow_attach,
 	.attach		= schedtune_attach,
 	.can_attach     = schedtune_can_attach,
 	.cancel_attach  = schedtune_cancel_attach,
+
+
 	.legacy_cftypes	= files,
 	.early_init	= 1,
 };
+
 
 static inline void
 schedtune_init_cgroups(void)
