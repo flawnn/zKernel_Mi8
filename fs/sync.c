@@ -439,10 +439,11 @@ void emergency_sync(void)
  */
 SYSCALL_DEFINE1(syncfs, int, fd)
 {
-	struct fd f = fdget(fd);
+	struct fd f;
 	struct super_block *sb;
 	int ret;
 
+	f = fdget(fd);
 	if (!f.file)
 		return -EBADF;
 	sb = f.file->f_path.dentry->d_sb;
@@ -558,11 +559,13 @@ static void do_afsync_work(struct work_struct *work)
 
 static int do_fsync(unsigned int fd, int datasync)
 {
-	struct fd f = fdget(fd);
+	struct fd f;
 	int ret = -EBADF;
 #ifdef CONFIG_ASYNC_FSYNC
         struct fsync_work *fwork;
 #endif
+
+	f = fdget(fd);
 	if (f.file) {
 #ifdef CONFIG_ASYNC_FSYNC
                 ktime_t fsync_t, fsync_diff;
