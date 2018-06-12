@@ -18,11 +18,278 @@
 #include <linux/backing-dev.h>
 #include "internal.h"
 
-bool fsync_enabled = true;
-module_param(fsync_enabled, bool, 0755);
+
+
+#ifdef CONFIG_ASYNC_FSYNC
+#include <linux/statfs.h>
+#endif
+
+#ifdef CONFIG_DYNAMIC_FSYNC
+#include <linux/dyn_sync_cntrl.h>
+#endif
+
 
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
+
+/* Interruptible sync for Samsung Mobile Device */
+#ifdef CONFIG_INTERRUPTIBLE_SYNC
+
+#include <linux/workqueue.h>
+#include <linux/suspend.h>
+#include <linux/delay.h>
+
+//#define CONFIG_INTR_SYNC_DEBUG
+
+#ifdef CONFIG_INTR_SYNC_DEBUG
+#define dbg_print	printk
+#else
+#define dbg_print(...)
+#endif
+
+enum {
+	INTR_SYNC_STATE_IDLE = 0,
+	INTR_SYNC_STATE_QUEUED,
+	INTR_SYNC_STATE_RUNNING,
+	INTR_SYNC_STATE_MAX
+};
+
+struct interruptible_sync_work {
+	int id;
+	int ret;
+	unsigned int waiter;
+	unsigned int state;
+	unsigned long version;
+	spinlock_t lock;
+	struct completion done;
+	struct work_struct work;
+};
+
+/* Initially, intr_sync_work has zero pending */
+static struct interruptible_sync_work intr_sync_work[2];
+
+/* Last work start time */
+static atomic_t running_work_idx;
+
+/* intr_sync_wq will be created when intr_sync() is called at first time.
+ * And it is alive till system shutdown */
+static struct workqueue_struct *intr_sync_wq;
+
+/* It prevents double allocation of intr_sync_wq */
+static DEFINE_MUTEX(intr_sync_wq_lock);
+
+static inline struct interruptible_sync_work *INTR_SYNC_WORK(struct work_struct *work) 
+{
+	return container_of(work, struct interruptible_sync_work, work);
+}
+
+static void do_intr_sync(struct work_struct *work)
+{
+	struct interruptible_sync_work *sync_work = INTR_SYNC_WORK(work);
+	int ret = 0;
+	unsigned int waiter;
+
+	spin_lock(&sync_work->lock);
+	atomic_set(&running_work_idx, sync_work->id);
+	sync_work->state = INTR_SYNC_STATE_RUNNING;
+	waiter = sync_work->waiter;
+	spin_unlock(&sync_work->lock);
+
+	dbg_print("\nintr_sync: %s: call sys_sync on work[%d]-%ld\n",
+			__func__, sync_work->id, sync_work->version);
+
+	/* if no one waits, do not call sync() */
+	if (waiter) {
+		ret = sys_sync();
+		dbg_print("\nintr_sync: %s: done sys_sync on work[%d]-%ld\n",
+			__func__, sync_work->id, sync_work->version);
+	} else {
+		dbg_print("\nintr_sync: %s: cancel,no_wait on work[%d]-%ld\n",
+			__func__, sync_work->id, sync_work->version);
+	}
+
+	spin_lock(&sync_work->lock);
+	sync_work->version++;
+	sync_work->ret = ret;
+	sync_work->state = INTR_SYNC_STATE_IDLE;
+	complete_all(&sync_work->done);
+	spin_unlock(&sync_work->lock);
+}
+
+/* wakeup functions that depend on PM facilities
+ *
+ * struct intr_wakeup_data  : wrapper structure for variables for PM
+ *			      each thread has own instance of it
+ * __prepare_wakeup_event() : prepare and check intr_wakeup_data
+ * __check_wakeup_event()   : check wakeup-event with intr_wakeup_data
+ */
+struct intr_wakeup_data {
+	unsigned int cnt;
+};
+
+static inline int __prepare_wakeup_event(struct intr_wakeup_data *wd)
+{
+	if (pm_get_wakeup_count(&wd->cnt, false))
+		return 0;
+
+	pr_info("intr_sync: detected wakeup events before sync\n");
+	pm_print_active_wakeup_sources();
+	return -EBUSY;
+}
+
+static inline  int __check_wakeup_event(struct intr_wakeup_data *wd)
+{
+	unsigned int cnt, no_inpr;
+
+	no_inpr = pm_get_wakeup_count(&cnt, false);
+	if (no_inpr && (cnt == wd->cnt))
+		return 0;
+
+	pr_info("intr_sync: detected wakeup events(no_inpr: %u cnt: %u->%u)\n",
+		no_inpr, wd->cnt, cnt);
+	pm_print_active_wakeup_sources();
+	return -EBUSY;
+}
+
+/* Interruptible Sync
+ *
+ * intr_sync() is same function as sys_sync() except that it can wakeup.
+ * It's possible because of inter_syncd workqueue.
+ *
+ * If system gets wakeup event while sync_work is running,
+ * just return -EBUSY, otherwise 0.
+ *
+ * If intr_sync() is called again while sync_work is running, it will enqueue
+ * idle sync_work to work_queue and wait the completion of it.
+ * If there is not idle sync_work but queued one, it just increases waiter by 1,
+ * and waits the completion of queued sync_work.
+ *
+ * If you want to know returned value of sys_sync(),
+ * you can get it from the argument, sync_ret
+ */
+
+int intr_sync(int *sync_ret)
+{
+	int ret;
+enqueue_sync_wait:
+	/* If the workqueue exists, try to enqueue work and wait */
+	if (likely(intr_sync_wq)) {
+		struct interruptible_sync_work *sync_work;
+		struct intr_wakeup_data wd;
+		int work_idx;
+		int work_ver;
+find_idle:
+		work_idx = !atomic_read(&running_work_idx);
+		sync_work = &intr_sync_work[work_idx];
+
+		/* Prepare intr_wakeup_data and check wakeup event:
+		 * If a wakeup-event is detected, wake up right now
+		 */
+		if (__prepare_wakeup_event(&wd)) {
+			dbg_print("intr_sync: detect wakeup event "
+				"before waiting work[%d]\n", work_idx);
+			return -EBUSY;
+		}
+
+		dbg_print("\nintr_sync: try to wait work[%d]\n", work_idx);
+
+		spin_lock(&sync_work->lock);
+		work_ver = sync_work->version;
+		if (sync_work->state == INTR_SYNC_STATE_RUNNING) {
+			spin_unlock(&sync_work->lock);
+			dbg_print("intr_sync: work[%d] is already running, "
+				"find idle work\n", work_idx);
+			goto find_idle;
+		}
+
+		sync_work->waiter++;
+		if (sync_work->state == INTR_SYNC_STATE_IDLE) {
+			dbg_print("intr_sync: enqueue work[%d]\n", work_idx);
+			sync_work->state = INTR_SYNC_STATE_QUEUED;
+			reinit_completion(&sync_work->done);
+			queue_work(intr_sync_wq, &sync_work->work);
+		}
+		spin_unlock(&sync_work->lock);
+
+		do {
+			/* Check wakeup event first before waiting:
+			 * If a wakeup-event is detected, wake up right now
+			 */
+			if  (__check_wakeup_event(&wd)) {
+				spin_lock(&sync_work->lock);
+				sync_work->waiter--;
+				spin_unlock(&sync_work->lock);
+				dbg_print("intr_sync: detect wakeup event "
+					"while waiting work[%d]\n", work_idx);
+				return -EBUSY;
+			}
+
+//			dbg_print("intr_sync: waiting work[%d]\n", work_idx);
+			/* Return 0 if timed out, or positive if completed. */
+			ret = wait_for_completion_io_timeout(
+					&sync_work->done, HZ/10);
+			/* A work that we are waiting for has done. */
+			if ((ret > 0) || (sync_work->version != work_ver))
+				break;
+//			dbg_print("intr_sync: timeout work[%d]\n", work_idx);
+		} while (1);
+
+		spin_lock(&sync_work->lock);
+		sync_work->waiter--;
+		if (sync_ret)
+			*sync_ret = sync_work->ret;
+		spin_unlock(&sync_work->lock);
+		dbg_print("intr_sync: sync work[%d] is done with ret(%d)\n",
+				work_idx, sync_work->ret);
+		return 0;
+	}
+
+	/* check whether a workqueue exists or not under locked state.
+	 * Create new one if a workqueue is not created yet.
+	 */
+	mutex_lock(&intr_sync_wq_lock);
+	if (likely(!intr_sync_wq)) {
+		intr_sync_work[0].id = 0;
+		intr_sync_work[1].id = 1;
+		INIT_WORK(&intr_sync_work[0].work, do_intr_sync);
+		INIT_WORK(&intr_sync_work[1].work, do_intr_sync);
+		spin_lock_init(&intr_sync_work[0].lock);
+		spin_lock_init(&intr_sync_work[1].lock);
+		init_completion(&intr_sync_work[0].done);
+		init_completion(&intr_sync_work[1].done);
+		intr_sync_wq = alloc_ordered_workqueue("intr_syncd", WQ_MEM_RECLAIM);
+		dbg_print("\nintr_sync: try to allocate intr_sync_queue\n");
+	}
+	mutex_unlock(&intr_sync_wq_lock);
+
+	/* try to enqueue work again if the workqueue is created successfully */
+	if (likely(intr_sync_wq))
+		goto enqueue_sync_wait;
+
+	printk("\nintr_sync: allocation failed, just call sync()\n");
+	ret = sys_sync();
+	if (sync_ret)
+		*sync_ret = ret;
+	return 0;
+}
+#else /* CONFIG_INTERRUPTIBLE_SYNC */
+int intr_sync(int *sync_ret)
+{
+	int ret = sys_sync();
+	if (sync_ret)
+		*sync_ret = ret;
+	return 0;
+}
+#endif /* CONFIG_INTERRUPTIBLE_SYNC */
+
+#ifdef CONFIG_ASYNC_FSYNC
+#define FLAG_ASYNC_FSYNC        0x1
+static struct workqueue_struct *fsync_workqueue = NULL;
+struct fsync_work {
+	struct work_struct work;
+	char pathname[256];
+};
+#endif
 
 /*
  * Do the filesystem syncing work. For simple filesystems
@@ -98,6 +365,21 @@ static void fdatawait_one_bdev(struct block_device *bdev, void *arg)
 	filemap_fdatawait_keep_errors(bdev->bd_inode->i_mapping);
 }
 
+#ifdef CONFIG_DYNAMIC_FSYNC
+/*
+ * Sync all the data for all the filesystems (called by sys_sync() and
+ * emergency sync)
+ */
+void sync_filesystems(int wait)
+{
+	iterate_supers(sync_inodes_one_sb, NULL);
+	iterate_supers(sync_fs_one_sb, &wait);
+	iterate_supers(sync_fs_one_sb, &wait);
+	iterate_bdevs(fdatawrite_one_bdev, NULL);
+	iterate_bdevs(fdatawait_one_bdev, NULL);
+}
+#endif
+
 /*
  * Sync everything. We start by waking flusher threads so that most of
  * writeback runs on all devices in parallel. Then we sync all inodes reliably
@@ -157,14 +439,10 @@ void emergency_sync(void)
  */
 SYSCALL_DEFINE1(syncfs, int, fd)
 {
-	struct fd f;
+	struct fd f = fdget(fd);
 	struct super_block *sb;
 	int ret;
 
-	if (!fsync_enabled)
-		return 0;
-
-	f = fdget(fd);
 	if (!f.file)
 		return -EBADF;
 	sb = f.file->f_path.dentry->d_sb;
@@ -190,10 +468,11 @@ SYSCALL_DEFINE1(syncfs, int, fd)
  */
 int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 {
-	struct inode *inode = file->f_mapping->host;
-
-	if (!fsync_enabled)
+#ifdef CONFIG_DYNAMIC_FSYNC
+	if (likely(dyn_fsync_active && suspend_active))
 		return 0;
+#endif	
+	struct inode *inode = file->f_mapping->host;
 
 	if (!file->f_op->fsync)
 		return -EINVAL;
@@ -221,33 +500,156 @@ int vfs_fsync(struct file *file, int datasync)
 }
 EXPORT_SYMBOL(vfs_fsync);
 
+#ifdef CONFIG_ASYNC_FSYNC
+extern int emmc_perf_degr(void);
+#define LOW_STORAGE_THRESHOLD   786432
+int async_fsync(struct file *file, int fd)
+{
+
+        struct inode *inode = file->f_mapping->host;
+        struct super_block *sb = inode->i_sb;
+        struct kstatfs st;
+
+        if ((sb->fsync_flags & FLAG_ASYNC_FSYNC) == 0)
+                return 0;
+
+        if (!emmc_perf_degr())
+                return 0;
+
+        if (fd_statfs(fd, &st))
+                return 0;
+
+        if (st.f_bfree > LOW_STORAGE_THRESHOLD)
+                return 0;
+
+        return 1;
+}
+
+static int do_async_fsync(char *pathname)
+{
+        struct file *file;
+        int ret;
+        file = filp_open(pathname, O_RDWR, 0);
+        if (IS_ERR(file)) {
+                pr_debug("%s: can't open %s\n", __func__, pathname);
+                return -EBADF;
+        }
+        ret = vfs_fsync(file, 0);
+
+        filp_close(file, NULL);
+        return ret;
+}
+
+static void do_afsync_work(struct work_struct *work)
+{
+        struct fsync_work *fwork =
+                container_of(work, struct fsync_work, work);
+        int ret = -EBADF;
+
+        pr_debug("afsync: %s\n", fwork->pathname);
+        ret = do_async_fsync(fwork->pathname);
+        if (ret != 0 && ret != -EBADF)
+                pr_info("afsync return %d\n", ret);
+        else
+                pr_debug("afsync: %s done\n", fwork->pathname);
+        kfree(fwork);
+}
+#endif
+
 static int do_fsync(unsigned int fd, int datasync)
 {
-	struct fd f;
+	struct fd f = fdget(fd);
 	int ret = -EBADF;
-	
-	if (!fsync_enabled)
-		return 0;
-
-	f = fdget(fd);
+#ifdef CONFIG_ASYNC_FSYNC
+        struct fsync_work *fwork;
+#endif
 	if (f.file) {
+#ifdef CONFIG_ASYNC_FSYNC
+                ktime_t fsync_t, fsync_diff;
+                char pathname[256], *path;
+                path = d_path(&(f.file->f_path), pathname, sizeof(pathname));
+                if (IS_ERR(path))
+                        path = "(unknown)";
+                else if (async_fsync(f.file, fd)) {
+                        if (!fsync_workqueue)
+                                fsync_workqueue =
+                                        create_singlethread_workqueue("fsync");
+                        if (!fsync_workqueue)
+                                goto no_async;
+
+                        if (IS_ERR(path))
+                                goto no_async;
+
+                        fwork = kmalloc(sizeof(*fwork), GFP_KERNEL);
+                        if (fwork) {
+                                strncpy(fwork->pathname, path,
+                                        sizeof(fwork->pathname) - 1);
+                                INIT_WORK(&fwork->work, do_afsync_work);
+                                queue_work(fsync_workqueue, &fwork->work);
+                                fdput(f);
+                                return 0;
+                        }
+                }
+no_async:
+                fsync_t = ktime_get();
+#endif
 		ret = vfs_fsync(f.file, datasync);
 		fdput(f);
-		inc_syscfs(current);
+#ifdef CONFIG_ASYNC_FSYNC
+                fsync_diff = ktime_sub(ktime_get(), fsync_t);
+                if (ktime_to_ms(fsync_diff) >= 5000) {
+                        pr_info("VFS: %s pid:%d(%s)(parent:%d/%s)\
+                                takes %lld ms to fsync %s.\n", __func__,
+                                current->pid, current->comm,
+                                current->parent->pid, current->parent->comm,
+                                ktime_to_ms(fsync_diff), path);
+                }
+#endif
 	}
 	return ret;
 }
 
 SYSCALL_DEFINE1(fsync, unsigned int, fd)
 {
+#ifdef CONFIG_DYNAMIC_FSYNC
+	if (likely(dyn_fsync_active && suspend_active))
+		return 0;
+#endif
 	return do_fsync(fd, 0);
 }
 
 SYSCALL_DEFINE1(fdatasync, unsigned int, fd)
 {
 
+#ifdef CONFIG_DYNAMIC_FSYNC
+	if (likely(dyn_fsync_active && suspend_active))
+		return 0;
+#endif
+
 	return do_fsync(fd, 1);
 }
+
+/**
+ * generic_write_sync - perform syncing after a write if file / inode is sync
+ * @file:	file to which the write happened
+ * @pos:	offset where the write started
+ * @count:	length of the write
+ *
+ * This is just a simple wrapper about our general syncing function.
+ */
+ssize_t generic_write_sync(struct kiocb *iocb, ssize_t count)
+{
+	if (iocb->ki_flags & IOCB_DSYNC) {
+		int ret = vfs_fsync_range(iocb->ki_filp,
+				iocb->ki_pos - count, iocb->ki_pos - 1,
+				(iocb->ki_flags & IOCB_SYNC) ? 0 : 1);
+		if (ret)
+			return ret;
+	}
+
+	return count;
+}
+EXPORT_SYMBOL(generic_write_sync);
 
 /*
  * sys_sync_file_range() permits finely controlled syncing over a segment of
@@ -305,8 +707,10 @@ SYSCALL_DEFINE4(sync_file_range, int, fd, loff_t, offset, loff_t, nbytes,
 	loff_t endbyte;			/* inclusive */
 	umode_t i_mode;
 
-	if (!fsync_enabled)
+#ifdef CONFIG_DYNAMIC_FSYNC
+	if (likely(dyn_fsync_active && suspend_active))
 		return 0;
+#endif
 
 	ret = -EINVAL;
 	if (flags & ~VALID_FLAGS)
@@ -388,5 +792,9 @@ out:
 SYSCALL_DEFINE4(sync_file_range2, int, fd, unsigned int, flags,
 				 loff_t, offset, loff_t, nbytes)
 {
+#ifdef CONFIG_DYNAMIC_FSYNC
+	if (likely(dyn_fsync_active && suspend_active))
+		return 0;
+#endif
 	return sys_sync_file_range(fd, offset, nbytes, flags);
 }

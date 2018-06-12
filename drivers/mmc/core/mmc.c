@@ -74,6 +74,14 @@ static const struct mmc_fixup mmc_ext_csd_fixups[] = {
 		__res & __mask;						\
 	})
 
+#ifdef CONFIG_ASYNC_FSYNC
+static unsigned int perf_degr;
+int emmc_perf_degr(void)
+{
+	return perf_degr;
+}
+#endif
+
 static int mmc_switch_status(struct mmc_card *card, bool ignore_crc);
 /*
  * Given the decoded CSD structure, decode the raw CID to our CID structure.

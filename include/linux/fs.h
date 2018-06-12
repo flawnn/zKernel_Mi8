@@ -1440,6 +1440,10 @@ struct super_block {
 
 	/* Being remounted read-only */
 	int s_readonly_remount;
+#ifdef CONFIG_ASYNC_FSYNC
+#define FLAG_ASYNC_FSYNC        0x1
+	unsigned int fsync_flags;
+#endif
 
 	/* AIO completions deferred from interrupt context */
 	struct workqueue_struct *s_dio_done_wq;
@@ -2600,25 +2604,7 @@ extern int filemap_check_errors(struct address_space *mapping);
 extern int vfs_fsync_range(struct file *file, loff_t start, loff_t end,
 			   int datasync);
 extern int vfs_fsync(struct file *file, int datasync);
-
-/*
- * Sync the bytes written if this was a synchronous write.  Expect ki_pos
- * to already be updated for the write, and will return either the amount
- * of bytes passed in, or an error if syncing the file failed.
- */
-static inline ssize_t generic_write_sync(struct kiocb *iocb, ssize_t count)
-{
-	if (iocb->ki_flags & IOCB_DSYNC) {
-		int ret = vfs_fsync_range(iocb->ki_filp,
-				iocb->ki_pos - count, iocb->ki_pos - 1,
-				(iocb->ki_flags & IOCB_SYNC) ? 0 : 1);
-		if (ret)
-			return ret;
-	}
-
-	return count;
-}
-
+extern ssize_t generic_write_sync(struct kiocb *iocb, ssize_t count);
 extern void emergency_sync(void);
 extern void emergency_remount(void);
 #ifdef CONFIG_BLOCK
