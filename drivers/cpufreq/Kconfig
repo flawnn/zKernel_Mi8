@@ -354,6 +354,24 @@ config GENERAL_BOOST_FREQ_PERF
 	help
 	  General boost frequency for the performance CPU cluster.
 
+config FLEX_BOOST_FREQ_LP
+	int "Low-power cluster general boost freq"
+	default "0"
+	help
+	  General boost frequency for the low-power CPU cluster.
+
+config FLEX_BOOST_FREQ_PERF
+	int "Performance cluster general boost freq"
+	default "0"
+	help
+	  General boost frequency for the performance CPU cluster.
+
+config FLEX_BOOST_DURATION_MS
+	int "Flex boost duration"
+	default "150"
+	help
+	  Input boost duration in milliseconds.
+
 endif
 
 
