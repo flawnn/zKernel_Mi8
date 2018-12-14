@@ -10,6 +10,7 @@ void cpu_input_boost_kick(void);
 void cpu_input_boost_kick_max(unsigned int duration_ms);
 void cluster_input_boost_kick_max(unsigned int duration_ms, int cpu);
 void cpu_input_boost_kick_general(unsigned int duration_ms);
+void cpu_input_boost_kick_flex(void);
 #else
 static inline void cpu_input_boost_kick(void)
 {
