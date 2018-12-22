@@ -798,3 +798,8 @@ CONFIG_HZ_300=y
 #Sound Control
 #
 CONFIG_SOUND_CONTROL=y
+
+#
+#Host Performance Booster
+#
+CONFIG_SCSI_UFSHCD_HPB_ACTIVATE=y
