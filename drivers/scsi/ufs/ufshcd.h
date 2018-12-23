@@ -999,10 +999,6 @@ struct ufs_hba {
 	struct ufs_desc_size desc_size;
 	bool restore_needed;
 
-	/* To monitor slow UFS I/O requests. */
-	u64 slowio_us;
-	u64 slowio_cnt;
-
 	/* HPB support */
 	u32 ufshpb_feat;
 	int ufshpb_state;
@@ -1012,8 +1008,6 @@ struct ufs_hba {
 	struct ufshpb_lu *ufshpb_lup[UFS_UPIU_MAX_GENERAL_LUN];
 	struct scsi_device *sdev_ufs_lu[UFS_UPIU_MAX_GENERAL_LUN];
 	struct work_struct ufshpb_eh_work;
-
-	struct ufs_manual_gc manual_gc;
 };
 
 static inline void ufshcd_mark_shutdown_ongoing(struct ufs_hba *hba)
