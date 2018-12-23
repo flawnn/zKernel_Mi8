@@ -24,7 +24,6 @@
 #include <asm/cacheflush.h>
 #include <soc/qcom/scm.h>
 #include <linux/powersuspend.h>
-#include <mach/scm.h>
 #include "governor.h"
 
 static DEFINE_SPINLOCK(tz_lock);
@@ -443,16 +442,6 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 #endif
 
 	/* keeps stats.private_data == NULL   */
-	int act_level;
-	int norm_cycles;
-	int gpu_percent;
-	static int busy_bin, frame_flag;
-
-	if (priv->bus.num)
-		stats.private_data = &b;
-	else
-		stats.private_data = NULL;
-
 	result = devfreq->profile->get_dev_status(devfreq->dev.parent, &stats);
 	if (result) {
 		pr_err(TAG "get_status failed %d\n", result);
@@ -466,7 +455,6 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 	}
 
 	*freq = stats.current_frequency;
-	*flag = 0;
 
 	/*
 	 * Force to use & record as min freq when system has
@@ -520,14 +508,6 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 		return 0;
 	}
 
-	if ((stats.busy_time * 100 / stats.total_time) > BUSY_BIN) {
-		busy_bin += stats.busy_time;
-		if (stats.total_time > LONG_FRAME)
-			frame_flag = 1;
-	} else {
-		busy_bin = 0;
-		frame_flag = 0;
-	}
 
 	level = devfreq_get_freq_level(devfreq, stats.current_frequency);
 	if (level < 0) {
@@ -539,19 +519,16 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 	 * If there is an extended block of busy processing,
 	 * increase frequency.  Otherwise run the normal algorithm.
 	 */
-	if (priv->bin.busy_time > CEILING ||
-		(busy_bin > CEILING && frame_flag)) {
+	if (!priv->disable_busy_time_burst &&
+			priv->bin.busy_time > CEILING) {
 		val = -1 * level;
-		busy_bin = 0;
-		frame_flag = 0;
 	} else {
 
 		scm_data[0] = level;
 		scm_data[1] = priv->bin.total_time;
 		scm_data[2] = priv->bin.busy_time;
 		scm_data[3] = context_count;
-		__secure_tz_update_entry3(scm_data, sizeof(scm_data),
-					&val, sizeof(val), priv);
+																	__secure_tz_update_entry3(scm_data, sizeof(scm_data), &val, sizeof(val), priv);
 	}
 	priv->bin.total_time = 0;
 	priv->bin.busy_time = 0;

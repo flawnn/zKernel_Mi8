@@ -1809,276 +1809,267 @@ static void adreno_set_active_ctxs_null(struct adreno_device *adreno_dev)
  */
 static int _adreno_start(struct adreno_device *adreno_dev)
 {
-	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
-	struct adreno_gpudev *gpudev = ADRENO_GPU_DEVICE(adreno_dev);
-	int status = -EINVAL, ret;
-	unsigned int state = device->state;
-	bool regulator_left_on;
-	unsigned int pmqos_wakeup_vote = device->pwrctrl.pm_qos_wakeup_latency;
-	unsigned int pmqos_active_vote = device->pwrctrl.pm_qos_active_latency;
+    struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+    struct adreno_gpudev *gpudev = ADRENO_GPU_DEVICE(adreno_dev);
+    int status = -EINVAL, ret;
+    unsigned int state = device->state;
+    bool regulator_left_on;
+    unsigned int pmqos_wakeup_vote = device->pwrctrl.pm_qos_wakeup_latency;
+    unsigned int pmqos_active_vote = device->pwrctrl.pm_qos_active_latency;
 
-	/* make sure ADRENO_DEVICE_STARTED is not set here */
-	BUG_ON(test_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv));
+    /* make sure ADRENO_DEVICE_STARTED is not set here */
+    BUG_ON(test_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv));
 
-	/* disallow l2pc during wake up to improve GPU wake up time */
-	kgsl_pwrctrl_update_l2pc(&adreno_dev->dev,
-			KGSL_L2PC_WAKEUP_TIMEOUT);
+    /* disallow l2pc during wake up to improve GPU wake up time */
+    kgsl_pwrctrl_update_l2pc(&adreno_dev->dev,
+            KGSL_L2PC_WAKEUP_TIMEOUT);
 
-	pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
-			pmqos_wakeup_vote);
+    pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
+            pmqos_wakeup_vote);
 
-	regulator_left_on = regulators_left_on(device);
+    regulator_left_on = regulators_left_on(device);
 
-	/* Clear any GPU faults that might have been left over */
-	adreno_clear_gpu_fault(adreno_dev);
+    /* Clear any GPU faults that might have been left over */
+    adreno_clear_gpu_fault(adreno_dev);
 
-	/* Put the GPU in a responsive state */
-	status = kgsl_pwrctrl_change_state(device, KGSL_STATE_AWARE);
-	if (status)
-		goto error_pwr_off;
+    /* Put the GPU in a responsive state */
+    status = kgsl_pwrctrl_change_state(device, KGSL_STATE_AWARE);
+    if (status)
+        goto error_pwr_off;
 
-	/* Set any stale active contexts to NULL */
-	adreno_set_active_ctxs_null(adreno_dev);
+    /* Set any stale active contexts to NULL */
+    adreno_set_active_ctxs_null(adreno_dev);
 
-	/* Set the bit to indicate that we've just powered on */
-	set_bit(ADRENO_DEVICE_PWRON, &adreno_dev->priv);
+    /* Set the bit to indicate that we've just powered on */
+    set_bit(ADRENO_DEVICE_PWRON, &adreno_dev->priv);
 
-	/* Soft reset the GPU if a regulator is stuck on*/
-	if (regulator_left_on)
-		_soft_reset(adreno_dev);
+    /* Soft reset the GPU if a regulator is stuck on*/
+    if (regulator_left_on)
+        _soft_reset(adreno_dev);
 
-	adreno_ringbuffer_set_global(adreno_dev, 0);
+    adreno_ringbuffer_set_global(adreno_dev, 0);
 
-	kgsl_pwrctrl_set_state(device, KGSL_STATE_INIT);
-	/*
-	 * initialization only needs to be done once initially until
-	 * device is shutdown
-	 */
-	if (test_bit(ADRENO_DEVICE_INITIALIZED, &adreno_dev->priv))
-		return 0;
+    status = kgsl_mmu_start(device);
+    if (status)
+        goto error_pwr_off;
 
-	status = kgsl_mmu_start(device);
-	if (status)
-		goto error_pwr_off;
+    _set_secvid(device);
 
-	_set_secvid(device);
+    status = adreno_ocmem_malloc(adreno_dev);
+    if (status) {
+        KGSL_DRV_ERR(device, "OCMEM malloc failed\n");
+        goto error_mmu_off;
+    }
 
-	status = adreno_ocmem_malloc(adreno_dev);
-	if (status) {
-		KGSL_DRV_ERR(device, "OCMEM malloc failed\n");
-		goto error_mmu_off;
-	}
+    /* Send OOB request to turn on the GX */
+    if (gpudev->oob_set) {
+        status = gpudev->oob_set(adreno_dev, OOB_GPU_SET_MASK,
+                OOB_GPU_CHECK_MASK,
+                OOB_GPU_CLEAR_MASK);
+        if (status)
+            goto error_mmu_off;
+    }
 
-	/* Send OOB request to turn on the GX */
-	if (gpudev->oob_set) {
-		status = gpudev->oob_set(adreno_dev, OOB_GPU_SET_MASK,
-				OOB_GPU_CHECK_MASK,
-				OOB_GPU_CLEAR_MASK);
-		if (status)
-			goto error_mmu_off;
-	}
+    /* Enable 64 bit gpu addr if feature is set */
+    if (gpudev->enable_64bit &&
+            adreno_support_64bit(adreno_dev))
+        gpudev->enable_64bit(adreno_dev);
 
-	/* Enable 64 bit gpu addr if feature is set */
-	if (gpudev->enable_64bit &&
-			adreno_support_64bit(adreno_dev))
-		gpudev->enable_64bit(adreno_dev);
+    if (adreno_dev->perfctr_pwr_lo == 0) {
+        ret = adreno_perfcounter_get(adreno_dev,
+            KGSL_PERFCOUNTER_GROUP_PWR, 1,
+            &adreno_dev->perfctr_pwr_lo, NULL,
+            PERFCOUNTER_FLAG_KERNEL);
 
-	if (adreno_dev->perfctr_pwr_lo == 0) {
-		ret = adreno_perfcounter_get(adreno_dev,
-			KGSL_PERFCOUNTER_GROUP_PWR, 1,
-			&adreno_dev->perfctr_pwr_lo, NULL,
-			PERFCOUNTER_FLAG_KERNEL);
-
-		if (ret) {
-			WARN_ONCE(1, "Unable to get perf counters for DCVS\n");
-			adreno_dev->perfctr_pwr_lo = 0;
-		}
-	}
+        if (ret) {
+            WARN_ONCE(1, "Unable to get perf counters for DCVS\n");
+            adreno_dev->perfctr_pwr_lo = 0;
+        }
+    }
 
 
-	if (device->pwrctrl.bus_control) {
-		/* VBIF waiting for RAM */
-		if (adreno_dev->starved_ram_lo == 0) {
-			ret = adreno_perfcounter_get(adreno_dev,
-				KGSL_PERFCOUNTER_GROUP_VBIF_PWR, 0,
-				&adreno_dev->starved_ram_lo, NULL,
-				PERFCOUNTER_FLAG_KERNEL);
+    if (device->pwrctrl.bus_control) {
+        /* VBIF waiting for RAM */
+        if (adreno_dev->starved_ram_lo == 0) {
+            ret = adreno_perfcounter_get(adreno_dev,
+                KGSL_PERFCOUNTER_GROUP_VBIF_PWR, 0,
+                &adreno_dev->starved_ram_lo, NULL,
+                PERFCOUNTER_FLAG_KERNEL);
 
-			if (ret) {
-				KGSL_DRV_ERR(device,
-					"Unable to get perf counters for bus DCVS\n");
-				adreno_dev->starved_ram_lo = 0;
-			}
-		}
+            if (ret) {
+                KGSL_DRV_ERR(device,
+                    "Unable to get perf counters for bus DCVS\n");
+                adreno_dev->starved_ram_lo = 0;
+            }
+        }
 
-		if (adreno_has_gbif(adreno_dev)) {
-			if (adreno_dev->starved_ram_lo_ch1 == 0) {
-				ret = adreno_perfcounter_get(adreno_dev,
-					KGSL_PERFCOUNTER_GROUP_VBIF_PWR, 1,
-					&adreno_dev->starved_ram_lo_ch1, NULL,
-					PERFCOUNTER_FLAG_KERNEL);
+        if (adreno_has_gbif(adreno_dev)) {
+            if (adreno_dev->starved_ram_lo_ch1 == 0) {
+                ret = adreno_perfcounter_get(adreno_dev,
+                    KGSL_PERFCOUNTER_GROUP_VBIF_PWR, 1,
+                    &adreno_dev->starved_ram_lo_ch1, NULL,
+                    PERFCOUNTER_FLAG_KERNEL);
 
-				if (ret) {
-					KGSL_DRV_ERR(device,
-						"Unable to get perf counters for bus DCVS\n");
-					adreno_dev->starved_ram_lo_ch1 = 0;
-				}
-			}
+                if (ret) {
+                    KGSL_DRV_ERR(device,
+                        "Unable to get perf counters for bus DCVS\n");
+                    adreno_dev->starved_ram_lo_ch1 = 0;
+                }
+            }
 
-			if (adreno_dev->ram_cycles_lo == 0) {
-				ret = adreno_perfcounter_get(adreno_dev,
-					KGSL_PERFCOUNTER_GROUP_VBIF,
-					GBIF_AXI0_READ_DATA_TOTAL_BEATS,
-					&adreno_dev->ram_cycles_lo, NULL,
-					PERFCOUNTER_FLAG_KERNEL);
+            if (adreno_dev->ram_cycles_lo == 0) {
+                ret = adreno_perfcounter_get(adreno_dev,
+                    KGSL_PERFCOUNTER_GROUP_VBIF,
+                    GBIF_AXI0_READ_DATA_TOTAL_BEATS,
+                    &adreno_dev->ram_cycles_lo, NULL,
+                    PERFCOUNTER_FLAG_KERNEL);
 
-				if (ret) {
-					KGSL_DRV_ERR(device,
-						"Unable to get perf counters for bus DCVS\n");
-					adreno_dev->ram_cycles_lo = 0;
-				}
-			}
+                if (ret) {
+                    KGSL_DRV_ERR(device,
+                        "Unable to get perf counters for bus DCVS\n");
+                    adreno_dev->ram_cycles_lo = 0;
+                }
+            }
 
-			if (adreno_dev->ram_cycles_lo_ch1_read == 0) {
-				ret = adreno_perfcounter_get(adreno_dev,
-					KGSL_PERFCOUNTER_GROUP_VBIF,
-					GBIF_AXI1_READ_DATA_TOTAL_BEATS,
-					&adreno_dev->ram_cycles_lo_ch1_read,
-					NULL,
-					PERFCOUNTER_FLAG_KERNEL);
+            if (adreno_dev->ram_cycles_lo_ch1_read == 0) {
+                ret = adreno_perfcounter_get(adreno_dev,
+                    KGSL_PERFCOUNTER_GROUP_VBIF,
+                    GBIF_AXI1_READ_DATA_TOTAL_BEATS,
+                    &adreno_dev->ram_cycles_lo_ch1_read,
+                    NULL,
+                    PERFCOUNTER_FLAG_KERNEL);
 
-				if (ret) {
-					KGSL_DRV_ERR(device,
-						"Unable to get perf counters for bus DCVS\n");
-					adreno_dev->ram_cycles_lo_ch1_read = 0;
-				}
-			}
+                if (ret) {
+                    KGSL_DRV_ERR(device,
+                        "Unable to get perf counters for bus DCVS\n");
+                    adreno_dev->ram_cycles_lo_ch1_read = 0;
+                }
+            }
 
-			if (adreno_dev->ram_cycles_lo_ch0_write == 0) {
-				ret = adreno_perfcounter_get(adreno_dev,
-					KGSL_PERFCOUNTER_GROUP_VBIF,
-					GBIF_AXI0_WRITE_DATA_TOTAL_BEATS,
-					&adreno_dev->ram_cycles_lo_ch0_write,
-					NULL,
-					PERFCOUNTER_FLAG_KERNEL);
+            if (adreno_dev->ram_cycles_lo_ch0_write == 0) {
+                ret = adreno_perfcounter_get(adreno_dev,
+                    KGSL_PERFCOUNTER_GROUP_VBIF,
+                    GBIF_AXI0_WRITE_DATA_TOTAL_BEATS,
+                    &adreno_dev->ram_cycles_lo_ch0_write,
+                    NULL,
+                    PERFCOUNTER_FLAG_KERNEL);
 
-				if (ret) {
-					KGSL_DRV_ERR(device,
-						"Unable to get perf counters for bus DCVS\n");
-					adreno_dev->ram_cycles_lo_ch0_write = 0;
-				}
-			}
+                if (ret) {
+                    KGSL_DRV_ERR(device,
+                        "Unable to get perf counters for bus DCVS\n");
+                    adreno_dev->ram_cycles_lo_ch0_write = 0;
+                }
+            }
 
-			if (adreno_dev->ram_cycles_lo_ch1_write == 0) {
-				ret = adreno_perfcounter_get(adreno_dev,
-					KGSL_PERFCOUNTER_GROUP_VBIF,
-					GBIF_AXI1_WRITE_DATA_TOTAL_BEATS,
-					&adreno_dev->ram_cycles_lo_ch1_write,
-					NULL,
-					PERFCOUNTER_FLAG_KERNEL);
+            if (adreno_dev->ram_cycles_lo_ch1_write == 0) {
+                ret = adreno_perfcounter_get(adreno_dev,
+                    KGSL_PERFCOUNTER_GROUP_VBIF,
+                    GBIF_AXI1_WRITE_DATA_TOTAL_BEATS,
+                    &adreno_dev->ram_cycles_lo_ch1_write,
+                    NULL,
+                    PERFCOUNTER_FLAG_KERNEL);
 
-				if (ret) {
-					KGSL_DRV_ERR(device,
-						"Unable to get perf counters for bus DCVS\n");
-					adreno_dev->ram_cycles_lo_ch1_write = 0;
-				}
-			}
-		} else {
-			/* VBIF DDR cycles */
-			if (adreno_dev->ram_cycles_lo == 0) {
-				ret = adreno_perfcounter_get(adreno_dev,
-					KGSL_PERFCOUNTER_GROUP_VBIF,
-					VBIF_AXI_TOTAL_BEATS,
-					&adreno_dev->ram_cycles_lo, NULL,
-					PERFCOUNTER_FLAG_KERNEL);
+                if (ret) {
+                    KGSL_DRV_ERR(device,
+                        "Unable to get perf counters for bus DCVS\n");
+                    adreno_dev->ram_cycles_lo_ch1_write = 0;
+                }
+            }
+        } else {
+            /* VBIF DDR cycles */
+            if (adreno_dev->ram_cycles_lo == 0) {
+                ret = adreno_perfcounter_get(adreno_dev,
+                    KGSL_PERFCOUNTER_GROUP_VBIF,
+                    VBIF_AXI_TOTAL_BEATS,
+                    &adreno_dev->ram_cycles_lo, NULL,
+                    PERFCOUNTER_FLAG_KERNEL);
 
-				if (ret) {
-					KGSL_DRV_ERR(device,
-						"Unable to get perf counters for bus DCVS\n");
-					adreno_dev->ram_cycles_lo = 0;
-				}
-			}
-		}
-	}
+                if (ret) {
+                    KGSL_DRV_ERR(device,
+                        "Unable to get perf counters for bus DCVS\n");
+                    adreno_dev->ram_cycles_lo = 0;
+                }
+            }
+        }
+    }
 
-	/* Clear the busy_data stats - we're starting over from scratch */
-	adreno_dev->busy_data.gpu_busy = 0;
-	adreno_dev->busy_data.bif_ram_cycles = 0;
-	adreno_dev->busy_data.bif_ram_cycles_read_ch1 = 0;
-	adreno_dev->busy_data.bif_ram_cycles_write_ch0 = 0;
-	adreno_dev->busy_data.bif_ram_cycles_write_ch1 = 0;
-	adreno_dev->busy_data.bif_starved_ram = 0;
-	adreno_dev->busy_data.bif_starved_ram_ch1 = 0;
+    /* Clear the busy_data stats - we're starting over from scratch */
+    adreno_dev->busy_data.gpu_busy = 0;
+    adreno_dev->busy_data.bif_ram_cycles = 0;
+    adreno_dev->busy_data.bif_ram_cycles_read_ch1 = 0;
+    adreno_dev->busy_data.bif_ram_cycles_write_ch0 = 0;
+    adreno_dev->busy_data.bif_ram_cycles_write_ch1 = 0;
+    adreno_dev->busy_data.bif_starved_ram = 0;
+    adreno_dev->busy_data.bif_starved_ram_ch1 = 0;
 
-	/* Restore performance counter registers with saved values */
-	adreno_perfcounter_restore(adreno_dev);
+    /* Restore performance counter registers with saved values */
+    adreno_perfcounter_restore(adreno_dev);
 
-	/* Start the GPU */
-	gpudev->start(adreno_dev);
+    /* Start the GPU */
+    gpudev->start(adreno_dev);
 
-	/*
-	 * The system cache control registers
-	 * live on the CX rail. Hence need
-	 * reprogramming everytime the GPU
-	 * comes out of power collapse.
-	 */
-	adreno_llc_setup(device);
+    /*
+     * The system cache control registers
+     * live on the CX rail. Hence need
+     * reprogramming everytime the GPU
+     * comes out of power collapse.
+     */
+    adreno_llc_setup(device);
 
-	/* Re-initialize the coresight registers if applicable */
-	adreno_coresight_start(adreno_dev);
+    /* Re-initialize the coresight registers if applicable */
+    adreno_coresight_start(adreno_dev);
 
-	adreno_irqctrl(adreno_dev, 1);
+    adreno_irqctrl(adreno_dev, 1);
 
-	adreno_perfcounter_start(adreno_dev);
+    adreno_perfcounter_start(adreno_dev);
 
-	/* Clear FSR here in case it is set from a previous pagefault */
-	kgsl_mmu_clear_fsr(&device->mmu);
+    /* Clear FSR here in case it is set from a previous pagefault */
+    kgsl_mmu_clear_fsr(&device->mmu);
 
-	status = adreno_ringbuffer_start(adreno_dev, ADRENO_START_COLD);
-	if (status)
-		goto error_oob_clear;
+    status = adreno_ringbuffer_start(adreno_dev, ADRENO_START_COLD);
+    if (status)
+        goto error_oob_clear;
 
-	/* Start the dispatcher */
-	adreno_dispatcher_start(device);
+    /* Start the dispatcher */
+    adreno_dispatcher_start(device);
 
-	device->reset_counter++;
+    device->reset_counter++;
 
-	set_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv);
+    set_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv);
 
-	if (pmqos_active_vote != pmqos_wakeup_vote)
-		pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
-				pmqos_active_vote);
+    if (pmqos_active_vote != pmqos_wakeup_vote)
+        pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
+                pmqos_active_vote);
 
-	/* Send OOB request to allow IFPC */
-	if (gpudev->oob_clear) {
-		gpudev->oob_clear(adreno_dev, OOB_GPU_CLEAR_MASK);
+    /* Send OOB request to allow IFPC */
+    if (gpudev->oob_clear) {
+        gpudev->oob_clear(adreno_dev, OOB_GPU_CLEAR_MASK);
 
-		/* If we made it this far, the BOOT OOB was sent to the GMU */
-		if (ADRENO_QUIRK(adreno_dev, ADRENO_QUIRK_HFI_USE_REG))
-			gpudev->oob_clear(adreno_dev,
-					OOB_BOOT_SLUMBER_CLEAR_MASK);
-	}
+        /* If we made it this far, the BOOT OOB was sent to the GMU */
+        if (ADRENO_QUIRK(adreno_dev, ADRENO_QUIRK_HFI_USE_REG))
+            gpudev->oob_clear(adreno_dev,
+                    OOB_BOOT_SLUMBER_CLEAR_MASK);
+    }
 
-	return 0;
+    return 0;
 
 error_oob_clear:
-	if (gpudev->oob_clear)
-		gpudev->oob_clear(adreno_dev, OOB_GPU_CLEAR_MASK);
+    if (gpudev->oob_clear)
+        gpudev->oob_clear(adreno_dev, OOB_GPU_CLEAR_MASK);
 
 error_mmu_off:
-	kgsl_mmu_stop(&device->mmu);
+    kgsl_mmu_stop(&device->mmu);
 
 error_pwr_off:
-	/* set the state back to original state */
-	kgsl_pwrctrl_change_state(device, state);
+    /* set the state back to original state */
+    kgsl_pwrctrl_change_state(device, state);
 
-	if (pmqos_active_vote != pmqos_wakeup_vote)
-		pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
-				pmqos_active_vote);
+    if (pmqos_active_vote != pmqos_wakeup_vote)
+        pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
+                pmqos_active_vote);
 
-	return status;
+    return status;
 }
-
 /**
  * adreno_start() - Power up and initialize the GPU
  * @device: Pointer to the KGSL device to power up
@@ -2222,57 +2213,54 @@ static inline bool adreno_try_soft_reset(struct kgsl_device *device, int fault)
  */
 int adreno_reset(struct kgsl_device *device, int fault)
 {
-	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
-	int ret = -EINVAL;
-	int i = 0;
+    struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+    int ret = -EINVAL;
+    int i = 0;
 
-	/* Try soft reset first */
-	if (adreno_try_soft_reset(device, fault)) {
-		/* Make sure VBIF is cleared before resetting */
-		ret = adreno_vbif_clear_pending_transactions(device);
+    /* Try soft reset first */
+    if (adreno_try_soft_reset(device, fault)) {
+        /* Make sure VBIF is cleared before resetting */
+        ret = adreno_vbif_clear_pending_transactions(device);
 
-		if (ret == 0) {
-			ret = adreno_soft_reset(device);
-			if (ret)
-				KGSL_DEV_ERR_ONCE(device,
-					"Device soft reset failed\n");
-		}
-	}
-	if (ret) {
-		/* If soft reset failed/skipped, then pull the power */
-		kgsl_pwrctrl_change_state(device, KGSL_STATE_INIT);
-		/* since device is officially off now clear start bit */
-		clear_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv);
+        if (ret == 0) {
+            ret = adreno_soft_reset(device);
+            if (ret)
+                KGSL_DEV_ERR_ONCE(device,
+                    "Device soft reset failed\n");
+        }
+    }
+    if (ret) {
+        /* If soft reset failed/skipped, then pull the power */
+        kgsl_pwrctrl_change_state(device, KGSL_STATE_INIT);
+        /* since device is officially off now clear start bit */
+        clear_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv);
 
-		/* Keep trying to start the device until it works */
-		for (i = 0; i < NUM_TIMES_RESET_RETRY; i++) {
-			ret = adreno_start(device, 0);
-			if (!ret)
-				break;
+        /* Keep trying to start the device until it works */
+        for (i = 0; i < NUM_TIMES_RESET_RETRY; i++) {
+            ret = adreno_start(device, 0);
+            if (!ret)
+                break;
 
-			msleep(20);
-		}
-	}
-	if (ret)
-		return ret;
+            msleep(20);
+        }
+    }
+    if (ret)
+        return ret;
 
-	if (i != 0)
-		KGSL_DRV_WARN(device, "Device hard reset tried %d tries\n", i);
+    if (i != 0)
+        KGSL_DRV_WARN(device, "Device hard reset tried %d tries\n", i);
 
-	/*
-	 * If active_cnt is non-zero then the system was active before
-	 * going into a reset - put it back in that state
-	 */
+    /*
+     * If active_cnt is non-zero then the system was active before
+     * going into a reset - put it back in that state
+     */
 
-	if (atomic_read(&device->active_cnt))
-		kgsl_pwrctrl_change_state(device, KGSL_STATE_ACTIVE);
-	
+    if (atomic_read(&device->active_cnt))
+        kgsl_pwrctrl_change_state(device, KGSL_STATE_ACTIVE);
+    else
+        kgsl_pwrctrl_change_state(device, KGSL_STATE_NAP);
 
-	/* Set the page table back to the default page table */
-	kgsl_mmu_setstate(&device->mmu, device->mmu.defaultpagetable,
-			KGSL_MEMSTORE_GLOBAL);
-
-	return ret;
+    return ret;
 }
 
 /**
@@ -2359,60 +2347,6 @@ static int _ft_policy_show(struct device *dev,
 	if (adreno_dev == NULL)
 		return 0;
 	return snprintf(buf, PAGE_SIZE, "0x%X\n", adreno_dev->ft_policy);
-}
-
-/**
- * _ft_pagefault_policy_store() -  Routine to configure FT
- * pagefault policy
- * @dev: device ptr
- * @attr: Device attribute
- * @buf: value to write
- * @count: size of the value to write
- *
- * FT pagefault policy can be set to any of the options below.
- * KGSL_FT_PAGEFAULT_INT_ENABLE -> BIT(0) set to enable pagefault INT
- * KGSL_FT_PAGEFAULT_GPUHALT_ENABLE  -> BIT(1) Set to enable GPU HALT on
- * pagefaults. This stalls the GPU on a pagefault on IOMMU v1 HW.
- * KGSL_FT_PAGEFAULT_LOG_ONE_PER_PAGE  -> BIT(2) Set to log only one
- * pagefault per page.
- * KGSL_FT_PAGEFAULT_LOG_ONE_PER_INT -> BIT(3) Set to log only one
- * pagefault per INT.
- */
-static int _ft_pagefault_policy_store(struct device *dev,
-				     struct device_attribute *attr,
-				     const char *buf, size_t count)
-{
-	struct adreno_device *adreno_dev = _get_adreno_dev(dev);
-	int ret = 0;
-	unsigned int policy = 0;
-	if (adreno_dev == NULL)
-		return 0;
-
-	mutex_lock(&adreno_dev->dev.mutex);
-
-	/* MMU option changed call function to reset MMU options */
-	if (count != _ft_sysfs_store(buf, count, &policy))
-		ret = -EINVAL;
-
-	if (!ret) {
-		policy &= (KGSL_FT_PAGEFAULT_INT_ENABLE |
-				KGSL_FT_PAGEFAULT_GPUHALT_ENABLE |
-				KGSL_FT_PAGEFAULT_LOG_ONE_PER_PAGE |
-				KGSL_FT_PAGEFAULT_LOG_ONE_PER_INT);
-		ret = kgsl_mmu_set_pagefault_policy(&(adreno_dev->dev.mmu),
-				adreno_dev->ft_pf_policy);
-		if (!ret)
-			adreno_dev->ft_pf_policy = policy;
-	}
-	mutex_unlock(&adreno_dev->dev.mutex);
-
-	if (!ret)
-		return count;
->>>>>>> 123d953787a9... msm: kgsl: Fix nice level for higher priority GPU start thread
-	else
-		kgsl_pwrctrl_change_state(device, KGSL_STATE_NAP);
-
-	return ret;
 }
 
 static int adreno_getproperty(struct kgsl_device *device,

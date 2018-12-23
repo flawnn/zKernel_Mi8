@@ -524,7 +524,6 @@ struct adreno_device {
 	struct adreno_dispatcher dispatcher;
 	struct kgsl_memdesc pwron_fixup;
 	unsigned int pwron_fixup_dwords;
-	struct adreno_dispatcher dispatcher;
 
 	struct work_struct input_work;
 	struct adreno_busy_data busy_data;
