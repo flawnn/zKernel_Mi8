@@ -803,6 +803,11 @@ CONFIG_HZ_300=y
 CONFIG_SOUND_CONTROL=y
 
 #
+#Adreno Idler
+#
+CONFIG_ADRENO_IDLER=y
+
+#
 #Host Performance Booster
 #
 CONFIG_SCSI_UFSHCD_HPB_ACTIVATE=y
