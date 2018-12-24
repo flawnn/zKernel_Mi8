@@ -1517,6 +1517,8 @@ static void ufshcd_ungate_work(struct work_struct *work)
 	ufshcd_hba_vreg_set_hpm(hba);
 	ufshcd_enable_clocks(hba);
 
+	ufshcd_enable_irq(hba);
+
 	/* Exit from hibern8 */
 	if (ufshcd_can_hibern8_during_gating(hba)) {
 		/* Prevent gating in this path */
@@ -1673,6 +1675,8 @@ static void ufshcd_gate_work(struct work_struct *work)
 		}
 		ufshcd_set_link_hibern8(hba);
 	}
+
+	ufshcd_disable_irq(hba);
 
 	/*
 	 * If auto hibern8 is supported then the link will already
@@ -2090,8 +2094,8 @@ static void __ufshcd_hibern8_release(struct ufs_hba *hba, bool no_sched)
 	if (delay_in_jiffies == 1)
 		delay_in_jiffies++;
 
-	schedule_delayed_work(&hba->hibern8_on_idle.enter_work,
-			      delay_in_jiffies);
+	queue_delayed_work(system_power_efficient_wq, 
+		&hba->hibern8_on_idle.enter_work, delay_in_jiffies);
 }
 
 static void ufshcd_hibern8_release(struct ufs_hba *hba, bool no_sched)
@@ -7043,8 +7047,8 @@ static int ufshcd_eh_device_reset_handler(struct scsi_cmnd *cmd)
 out:
 	hba->req_abort_count = 0;
 	if (!err) {
-		schedule_delayed_work(&hba->ufshpb_init_work,
-					msecs_to_jiffies(10));
+		queue_delayed_work(system_power_efficient_wq, 
+			&hba->ufshpb_init_work,	msecs_to_jiffies(10));
 		err = SUCCESS;
 	} else {
 		dev_err(hba->dev, "%s: failed with err %d\n", __func__, err);
@@ -8091,8 +8095,8 @@ static int ufshcd_probe_hba(struct ufs_hba *hba)
 			hba->clk_scaling.is_allowed = true;
 		}
 
-		schedule_delayed_work(&hba->ufshpb_init_work,
-						msecs_to_jiffies(0));
+		queue_delayed_work(system_power_efficient_wq, 
+			&hba->ufshpb_init_work, msecs_to_jiffies(0));
 
 		scsi_scan_host(hba->host);
 		pm_runtime_put_sync(hba->dev);
