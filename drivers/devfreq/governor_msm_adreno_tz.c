@@ -67,7 +67,7 @@ static DEFINE_SPINLOCK(suspend_lock);
 #define TZ_V2_UPDATE_WITH_CA_ID_64 0xD
 
 #define TAG "msm_adreno_tz: "
-
+static bool suspended = false;
 #if 1
 static unsigned int adrenoboost = 0;
 #endif
@@ -208,8 +208,6 @@ void compute_work_load(struct devfreq_dev_status *stats,
 				devfreq->profile->freq_table[0];
 	spin_unlock(&sample_lock);
 }
-/* Boolean to detect if pm has entered suspend mode */
-static bool suspended = false;
 
 /* Trap into the TrustZone, and call funcs there. */
 static int __secure_tz_reset_entry2(unsigned int *scm_data, u32 size_scm_data,
@@ -428,7 +426,7 @@ extern int adreno_idler(struct devfreq_dev_status stats, struct devfreq *devfreq
 
 #endif
 
-static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
+static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq, u32 *flag)
 {
 	int result = 0;
 	struct devfreq_msm_adreno_tz_data *priv = devfreq->data;
@@ -815,7 +813,7 @@ static void __exit msm_adreno_tz_exit(void)
 	if (ret)
 		pr_err(TAG "failed to remove governor %d\n", ret);
 
-	if (workqueue != NULL)
+	if(workqueue != NULL)
 		destroy_workqueue(workqueue);
 }
 
