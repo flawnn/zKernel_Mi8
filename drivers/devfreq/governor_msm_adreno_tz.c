@@ -458,6 +458,8 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq, u32 
 	 * Force to use & record as min freq when system has
 	 * entered pm-suspend or screen-off state.
 	 */
+	bool power_suspended = power_suspended;
+
 	if (suspended || power_suspended) {
 		*freq = devfreq->profile->freq_table[devfreq->profile->max_state - 1];
 		return 0;
@@ -669,10 +671,11 @@ static int tz_stop(struct devfreq *devfreq)
 static int tz_suspend(struct devfreq *devfreq)
 {
 	struct devfreq_msm_adreno_tz_data *priv = devfreq->data;
+	unsigned int scm_data[2] = {0, 0};
 
 	suspended = true;
 
-	__secure_tz_entry2(TZ_RESET_ID, 0, 0);
+	__secure_tz_reset_entry2(scm_data, sizeof(scm_data), priv->is_64);
 
 	priv->bin.total_time = 0;
 	priv->bin.busy_time = 0;
